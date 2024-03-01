@@ -39,6 +39,7 @@ import org.apache.commons.lang.StringUtils;
 import org.fao.geonet.api.ApiParams;
 import org.fao.geonet.api.ApiUtils;
 import org.fao.geonet.api.processing.report.SimpleMetadataProcessingReport;
+import org.fao.geonet.constants.Geonet;
 import org.fao.geonet.domain.AbstractMetadata;
 import org.fao.geonet.domain.Link;
 import org.fao.geonet.domain.Metadata;
@@ -52,6 +53,7 @@ import org.fao.geonet.kernel.url.UrlAnalyzer;
 import org.fao.geonet.repository.LinkRepository;
 import org.fao.geonet.repository.MetadataRepository;
 import org.fao.geonet.repository.specification.LinkSpecs;
+import org.fao.geonet.utils.Log;
 import org.jdom.JDOMException;
 import org.json.JSONException;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -95,6 +97,8 @@ import static org.fao.geonet.api.ApiParams.API_PARAM_RECORD_UUIDS_OR_SELECTION;
 @Tag(name = "links",
     description = "Record link operations")
 public class LinksApi {
+    public static final String LOGGER = Geonet.GEONETWORK + ".api.links";
+
     private static final int NUMBER_OF_SUBSEQUENT_PROCESS_MBEAN_TO_KEEP = 5;
     @Autowired
     protected ApplicationContext appContext;
@@ -115,17 +119,18 @@ public class LinksApi {
     @Autowired
     SettingManager settingManager;
 
-    private ArrayDeque<SelfNaming> mAnalyseProcesses = new ArrayDeque<>(NUMBER_OF_SUBSEQUENT_PROCESS_MBEAN_TO_KEEP);
+    private ArrayDeque<SelfNaming> metadataLinksAnalysisProcesses = new ArrayDeque<>(NUMBER_OF_SUBSEQUENT_PROCESS_MBEAN_TO_KEEP);
 
     @PostConstruct
     public void iniMBeansSlidingWindowWithEmptySlot() {
         for (int i = 0; i < NUMBER_OF_SUBSEQUENT_PROCESS_MBEAN_TO_KEEP; i++) {
             EmptySlot emptySlot = new EmptySlot(settingManager.getSiteId(), i);
-            mAnalyseProcesses.addFirst(emptySlot);
+            metadataLinksAnalysisProcesses.addFirst(emptySlot);
             try {
                 mBeanExporter.registerManagedResource(emptySlot, emptySlot.getObjectName());
             } catch (MalformedObjectNameException e) {
-                e.printStackTrace();
+                Log.error(LOGGER, String.format("Error registering metadata links analysis process '%s'",
+                    settingManager.getSiteId()), e);
             }
         }
     }
@@ -152,19 +157,19 @@ public class LinksApi {
     public Page<Link> getRecordLinks(
         @Parameter(description = "Filter, e.g. \"{url: 'png', lastState: 'ko', records: 'e421'}\", lastState being 'ok'/'ko'/'unknown'", required = false)
         @RequestParam(required = false)
-            LinkFilter filter,
+        LinkFilter filter,
         @Parameter(description = "Optional, filter links to records published in that group.", required = false)
         @RequestParam(required = false)
-            Integer[] groupIdFilter,
+        Integer[] groupIdFilter,
         @Parameter(description = "Optional, filter links to records created in that group.", required = false)
         @RequestParam(required = false)
-            Integer[] groupOwnerIdFilter,
+        Integer[] groupOwnerIdFilter,
         @Parameter(hidden = true)
-            Pageable pageRequest,
+        Pageable pageRequest,
         @Parameter(hidden = true)
-            HttpSession session,
+        HttpSession session,
         @Parameter(hidden = true)
-            HttpServletRequest request) throws Exception {
+        HttpServletRequest request) throws Exception {
 
         final UserSession userSession = ApiUtils.getUserSession(session);
         return getLinks(filter, groupIdFilter, groupOwnerIdFilter, pageRequest, userSession);
@@ -286,16 +291,16 @@ public class LinksApi {
         LinkFilter filter,
         @Parameter(description = "Optional, filter links to records published in that group.", required = false)
         @RequestParam(required = false)
-            Integer[] groupIdFilter,
+        Integer[] groupIdFilter,
         @Parameter(description = "Optional, filter links to records created in that group.", required = false)
         @RequestParam(required = false)
-            Integer[] groupOwnerIdFilter,
+        Integer[] groupOwnerIdFilter,
         @Parameter(hidden = true)
-            Pageable pageRequest,
+        Pageable pageRequest,
         @Parameter(hidden = true)
-            HttpSession session,
+        HttpSession session,
         @Parameter(hidden = true)
-            HttpServletResponse response) throws Exception {
+        HttpServletResponse response) throws Exception {
         final UserSession userSession = ApiUtils.getUserSession(session);
 
         final Page<Link> links = getLinks(filter, groupIdFilter, groupOwnerIdFilter, pageRequest, userSession);
@@ -317,31 +322,31 @@ public class LinksApi {
     public SimpleMetadataProcessingReport analyzeRecordLinks(
         @Parameter(description = API_PARAM_RECORD_UUIDS_OR_SELECTION)
         @RequestParam(required = false)
-            String[] uuids,
+        String[] uuids,
         @Parameter(
             description = ApiParams.API_PARAM_BUCKET_NAME,
             required = false)
         @RequestParam(
             required = false
         )
-            String bucket,
+        String bucket,
         @Parameter(
             description = "Only allowed if Administrator."
         )
         @RequestParam(
             required = false,
             defaultValue = "true")
-            boolean removeFirst,
+        boolean removeFirst,
         @RequestParam(
             required = false,
             defaultValue = "false")
-            boolean analyze,
+        boolean analyze,
         @Parameter(hidden = true)
-            HttpSession httpSession,
+        HttpSession httpSession,
         @Parameter(hidden = true)
-            HttpServletRequest request
+        HttpServletRequest request
     ) throws IOException, JDOMException {
-        MAnalyseProcess registredMAnalyseProcess = getRegistredMAnalyseProcess();
+        MetadataLinksAnalysisProcessor registredMAnalyseProcess = getRegistredMAnalyseProcess();
 
         ServiceContext serviceContext = ApiUtils.createServiceContext(request);
         UserSession session = ApiUtils.getUserSession(httpSession);
@@ -413,9 +418,9 @@ public class LinksApi {
     public void analyzeLinks(
         @Parameter(description = "URL")
         @RequestParam(required = false)
-            String[] url
-    ) throws IOException, JDOMException {
-        MAnalyseProcess registredMAnalyseProcess = getRegistredMAnalyseProcess();
+        String[] url
+    ) {
+        MetadataLinksAnalysisProcessor registredMAnalyseProcess = getRegistredMAnalyseProcess();
         registredMAnalyseProcess.testLink(Lists.newArrayList(url));
     }
 
@@ -434,19 +439,20 @@ public class LinksApi {
         return new ResponseEntity(HttpStatus.NO_CONTENT);
     }
 
-    private MAnalyseProcess getRegistredMAnalyseProcess() {
-        MAnalyseProcess mAnalyseProcess = new MAnalyseProcess(
+    private MetadataLinksAnalysisProcessor getRegistredMAnalyseProcess() {
+        MetadataLinksAnalysisProcessor mAnalyseProcess = new MetadataLinksAnalysisProcessor(
             settingManager.getSiteId(),
             linkRepository,
             metadataRepository,
             urlAnalyser, appContext);
         mBeanExporter.registerManagedResource(mAnalyseProcess, mAnalyseProcess.getObjectName());
         try {
-            mBeanExporter.unregisterManagedResource(mAnalyseProcesses.removeLast().getObjectName());
+            mBeanExporter.unregisterManagedResource(metadataLinksAnalysisProcesses.removeLast().getObjectName());
         } catch (MalformedObjectNameException e) {
-            e.printStackTrace();
+            Log.error(LOGGER, String.format("Error unregistering metadata links analysis process '%s'",
+                settingManager.getSiteId()), e);
         }
-        mAnalyseProcesses.addFirst(mAnalyseProcess);
+        metadataLinksAnalysisProcesses.addFirst(mAnalyseProcess);
         return mAnalyseProcess;
     }
 
