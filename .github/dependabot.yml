@@ -13,3 +13,23 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "daily"
+
+  - package-ecosystem: docker
+    directory: /docker/gn-cas-ldap/cas
+    schedule:
+      interval: daily
+
+  - package-ecosystem: docker
+    directory: /docker/gn-cas-ldap/cas/cas-overlay-template-6.2
+    schedule:
+      interval: daily
+
+  - package-ecosystem: docker
+    directory: /docker/gn-cas-ldap/ldap
+    schedule:
+      interval: daily
+
+  - package-ecosystem: pip
+    directory: /docs/manual
+    schedule:
+      interval: daily
